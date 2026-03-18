@@ -1,2 +1,2 @@
 # creationredefined
-:) redefined stuff for er no one
+inventions of mankind, posted here. Stay tuned for more.
