@@ -1,0 +1,374 @@
+
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+#gc{display:block}
+#wrap{position:relative;width:100%;line-height:0;background:#07071a}
+#hud{position:absolute;top:0;left:0;width:100%;display:flex;justify-content:space-between;padding:12px 16px;pointer-events:none}
+#sc{font-size:22px;font-weight:500;color:#fff;text-shadow:0 0 10px #a78bfa}
+#pct{font-size:12px;color:rgba(255,255,255,0.45);margin-top:2px;letter-spacing:1px}
+#ov{position:absolute;inset:0;background:rgba(7,7,26,0.92);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px}
+#ov h2{font-size:28px;font-weight:500;color:#fff;letter-spacing:3px}
+#ov .sub{font-size:13px;color:rgba(255,255,255,0.45);text-align:center;max-width:260px;line-height:1.7}
+#pb{padding:10px 32px;border-radius:20px;border:1.5px solid rgba(255,255,255,0.3);background:rgba(255,255,255,0.08);color:#fff;font-size:15px;cursor:pointer;margin-top:8px}
+#pb:hover{background:rgba(255,255,255,0.2)}
+</style>
+<div id="wrap">
+  <canvas id="gc"></canvas>
+  <div id="hud">
+    <div><div id="sc">0</div><div id="pct">easy</div></div>
+    <div style="text-align:right;font-size:13px;color:rgba(255,255,255,0.35)">attempts<br><span id="att-num" style="font-size:18px;color:rgba(255,255,255,0.6)">1</span></div>
+  </div>
+  <div id="ov">
+    <h2>space waves</h2>
+    <p class="sub">hold space · W · click to go up-diagonal<br>release to go down-diagonal<br>survive forever</p>
+    <button id="pb">play</button>
+  </div>
+</div>
+<script>
+(function(){
+const canvas = document.getElementById('gc');
+const ctx = canvas.getContext('2d');
+const ov = document.getElementById('ov');
+const scEl = document.getElementById('sc');
+const pctEl = document.getElementById('pct');
+const attEl = document.getElementById('att-num');
+const pb = document.getElementById('pb');
+
+let W, H;
+function resize(){
+  const wrap = document.getElementById('wrap');
+  W = wrap.clientWidth || 700;
+  H = Math.round(W * (360/700));
+  canvas.width = W; canvas.height = H;
+}
+resize();
+
+const SPEED = 4.5;
+const TRAIL_LEN = 80;
+const TUNNEL_BUF = 6000;
+const MARGIN = 40;
+// Ship always appears at this screen X
+const SHIP_SX = Math.round(W * 0.28);
+
+let state = 'menu', holding = false, attempts = 1;
+
+// worldX: total horizontal distance scrolled (world units)
+// shipWX: ship's world-X position (always = worldX + SHIP_SX, constant offset)
+// py: ship's Y (screen coords, changes each frame)
+let worldX, py;
+
+// Trail stores WORLD coords so we can project them each frame
+// trailPt = {wx, wy}  where wx is world-x, wy is y
+let trail, particles, bgStars, bgNebula;
+let tunnel, tunnelOffset, score, frame, rafId;
+
+function initStars(){
+  bgStars=[];
+  for(let i=0;i<120;i++)
+    bgStars.push({x:Math.random()*W,y:Math.random()*H,r:Math.random()*1.3+0.2,spd:Math.random()*0.8+0.2,bright:Math.random()});
+  bgNebula=[];
+  for(let i=0;i<5;i++)
+    bgNebula.push({x:Math.random()*W,y:Math.random()*H,rx:90+Math.random()*110,ry:40+Math.random()*70,hue:Math.random()<0.5?260:200,a:0.04+Math.random()*0.05});
+}
+
+function initTunnel(){
+  tunnel={top:new Float32Array(TUNNEL_BUF),bot:new Float32Array(TUNNEL_BUF)};
+  tunnelOffset=0;
+  const g=H*0.54;
+  for(let i=0;i<TUNNEL_BUF;i++){tunnel.top[i]=H/2-g/2;tunnel.bot[i]=H/2+g/2;}
+  generateTunnel(0,TUNNEL_BUF);
+}
+
+function generateTunnel(from,to){
+  const diff=Math.min(score/900,1);
+  const MIN_GAP=82,MAX_GAP=H*0.56;
+  const gapTarget=MAX_GAP-diff*(MAX_GAP-MIN_GAP);
+  const wander=1.0+diff*2.0;
+  const i0=from-tunnelOffset;
+  let midY=(i0>0&&i0<TUNNEL_BUF)?(tunnel.top[i0]+tunnel.bot[i0])/2:H/2;
+  let gap=(i0>0&&i0<TUNNEL_BUF)?tunnel.bot[i0]-tunnel.top[i0]:H*0.54;
+  let mv=0;
+  for(let wx=from;wx<to;wx++){
+    const i=wx-tunnelOffset;
+    if(i<0||i>=TUNNEL_BUF)continue;
+    gap+=(gapTarget-gap)*0.004;
+    mv+=(Math.random()-0.5)*wander;
+    mv*=0.93;
+    midY+=mv;
+    midY=Math.max(MARGIN+gap/2,Math.min(H-MARGIN-gap/2,midY));
+    tunnel.top[i]=midY-gap/2;
+    tunnel.bot[i]=midY+gap/2;
+  }
+  injectSpikes(from,to);
+}
+
+function injectSpikes(from,to){
+  const diff=Math.min(score/500,1.3);
+  const SH=22,SW=13;
+  let wx=from+120;
+  while(wx<to-120){
+    if(Math.random()<0.009+diff*0.012){
+      const side=Math.random()<0.5?'top':'bot';
+      for(let dx=0;dx<SW;dx++){
+        const i=(wx+dx)-tunnelOffset;
+        if(i<0||i>=TUNNEL_BUF)continue;
+        const t=Math.min(dx,SW-1-dx)/(SW/2);
+        if(side==='top')tunnel.top[i]+=t*SH;
+        else tunnel.bot[i]-=t*SH;
+      }
+      wx+=SW+65+Math.random()*55;
+    } else wx+=15;
+  }
+}
+
+function getTunnel(wx){
+  const i=Math.round(wx)-tunnelOffset;
+  if(i<0||i>=TUNNEL_BUF)return{top:H*0.2,bot:H*0.8};
+  return{top:tunnel.top[i],bot:tunnel.bot[i]};
+}
+
+function shiftTunnel(){
+  const need=worldX+W+300;
+  const have=tunnelOffset+TUNNEL_BUF;
+  if(need>have-600){
+    const shift=Math.floor(worldX)-tunnelOffset;
+    if(shift>0){
+      tunnel.top.copyWithin(0,shift);
+      tunnel.bot.copyWithin(0,shift);
+      tunnelOffset+=shift;
+      generateTunnel(tunnelOffset+TUNNEL_BUF-shift-400,tunnelOffset+TUNNEL_BUF);
+    }
+  }
+}
+
+// Convert world coords to screen coords
+function wToS(wx){ return wx - worldX; }
+
+function drawBg(){
+  ctx.fillStyle='#07071a';
+  ctx.fillRect(0,0,W,H);
+  for(const n of bgNebula){
+    const g=ctx.createRadialGradient(n.x,n.y,0,n.x,n.y,n.rx);
+    g.addColorStop(0,`hsla(${n.hue},70%,55%,${n.a})`);
+    g.addColorStop(1,'transparent');
+    ctx.save();ctx.scale(1,n.ry/n.rx);
+    ctx.fillStyle=g;ctx.beginPath();ctx.arc(n.x,n.y*n.rx/n.ry,n.rx,0,Math.PI*2);ctx.fill();
+    ctx.restore();
+    n.x-=0.25;if(n.x<-n.rx)n.x=W+n.rx;
+  }
+  for(const s of bgStars){
+    const tw=0.5+0.5*Math.sin(frame*0.025*s.bright+s.x);
+    ctx.fillStyle=`rgba(255,255,255,${0.3+0.7*tw*s.bright})`;
+    ctx.beginPath();ctx.arc(s.x,s.y,s.r,0,Math.PI*2);ctx.fill();
+    s.x-=s.spd;if(s.x<0){s.x=W;s.y=Math.random()*H;}
+  }
+}
+
+function drawTunnel(){
+  const tg=ctx.createLinearGradient(0,0,0,H);
+  tg.addColorStop(0,'#1e1b4b');tg.addColorStop(1,'#312e81');
+
+  ctx.beginPath();ctx.moveTo(0,0);
+  for(let sx=0;sx<=W;sx++)ctx.lineTo(sx,getTunnel(worldX+sx).top);
+  ctx.lineTo(W,0);ctx.closePath();ctx.fillStyle=tg;ctx.fill();
+
+  ctx.beginPath();ctx.moveTo(0,H);
+  for(let sx=0;sx<=W;sx++)ctx.lineTo(sx,getTunnel(worldX+sx).bot);
+  ctx.lineTo(W,H);ctx.closePath();ctx.fillStyle=tg;ctx.fill();
+
+  ctx.lineWidth=2;ctx.shadowColor='#818cf8';ctx.shadowBlur=8;
+  ctx.strokeStyle='#818cf8';
+  ctx.beginPath();
+  for(let sx=0;sx<=W;sx++){const v=getTunnel(worldX+sx).top;sx===0?ctx.moveTo(sx,v):ctx.lineTo(sx,v);}
+  ctx.stroke();
+  ctx.strokeStyle='#6366f1';
+  ctx.beginPath();
+  for(let sx=0;sx<=W;sx++){const v=getTunnel(worldX+sx).bot;sx===0?ctx.moveTo(sx,v):ctx.lineTo(sx,v);}
+  ctx.stroke();
+  ctx.shadowBlur=0;
+
+  ctx.shadowColor='#c7d2fe';ctx.shadowBlur=4;ctx.fillStyle='#a5b4fc';
+  for(let sx=2;sx<W-2;sx++){
+    const c=getTunnel(worldX+sx),p=getTunnel(worldX+sx-1),n=getTunnel(worldX+sx+1);
+    if(c.top>p.top+0.8&&c.top>n.top+0.8)ctx.fillRect(sx-1,c.top-2,3,5);
+    if(c.bot<p.bot-0.8&&c.bot<n.bot-0.8)ctx.fillRect(sx-1,c.bot-2,3,5);
+  }
+  ctx.shadowBlur=0;
+}
+
+function drawWave(){
+  // Project trail from world coords to screen coords THIS frame
+  // As worldX increases, older trail points (smaller wx) appear further left on screen
+  const screenTrail = trail.map(pt => ({
+    sx: pt.wx - worldX,  // world-x minus current scroll = screen-x
+    sy: pt.wy
+  }));
+
+  // Draw ribbon
+  if(screenTrail.length > 1){
+    const thick = 7;
+    const upper=[], lower=[];
+    for(let i=0;i<screenTrail.length;i++){
+      const t=screenTrail[i];
+      let dx,dy;
+      if(i<screenTrail.length-1){dx=screenTrail[i+1].sx-t.sx;dy=screenTrail[i+1].sy-t.sy;}
+      else{dx=t.sx-screenTrail[i-1].sx;dy=t.sy-screenTrail[i-1].sy;}
+      const len=Math.sqrt(dx*dx+dy*dy)||1;
+      const nx=-dy/len,ny=dx/len;
+      const a=i/screenTrail.length;
+      upper.push({x:t.sx+nx*thick*a,y:t.sy+ny*thick*a});
+      lower.push({x:t.sx-nx*thick*a,y:t.sy-ny*thick*a});
+    }
+    ctx.beginPath();
+    ctx.moveTo(upper[0].x,upper[0].y);
+    for(let i=1;i<upper.length;i++)ctx.lineTo(upper[i].x,upper[i].y);
+    for(let i=lower.length-1;i>=0;i--)ctx.lineTo(lower[i].x,lower[i].y);
+    ctx.closePath();
+    const tailSX = screenTrail[0].sx;
+    const g=ctx.createLinearGradient(tailSX,0,SHIP_SX,0);
+    g.addColorStop(0,'rgba(109,40,217,0)');
+    g.addColorStop(0.4,'rgba(124,58,237,0.4)');
+    g.addColorStop(1,'rgba(167,139,250,0.88)');
+    ctx.fillStyle=g;ctx.fill();
+
+    // glowing center line
+    ctx.beginPath();
+    ctx.moveTo(screenTrail[0].sx,screenTrail[0].sy);
+    for(let i=1;i<screenTrail.length;i++)ctx.lineTo(screenTrail[i].sx,screenTrail[i].sy);
+    ctx.strokeStyle='rgba(196,181,253,0.95)';
+    ctx.lineWidth=1.8;
+    ctx.shadowColor='#a78bfa';ctx.shadowBlur=12;
+    ctx.stroke();ctx.shadowBlur=0;
+
+    // spark dots
+    for(let i=4;i<screenTrail.length;i+=5){
+      const t=screenTrail[i];
+      ctx.fillStyle=`rgba(221,214,254,${(i/screenTrail.length)*0.7})`;
+      ctx.beginPath();ctx.arc(t.sx,t.sy,1.5*(i/screenTrail.length),0,Math.PI*2);ctx.fill();
+    }
+  }
+
+  // Particles
+  for(let i=particles.length-1;i>=0;i--){
+    const p=particles[i];
+    p.x+=p.vx;p.y+=p.vy;p.vy+=0.05;p.life-=p.big?0.035:0.065;
+    // particles are in screen coords, scroll them left too
+    p.x-=p.big?0:SPEED*0.3;
+    if(p.life<=0){particles.splice(i,1);continue;}
+    ctx.fillStyle=p.big?`rgba(196,181,253,${p.life})`:`rgba(167,139,250,${p.life*0.8})`;
+    ctx.beginPath();ctx.arc(p.x,p.y,(p.big?3.5:1.8)*p.life,0,Math.PI*2);ctx.fill();
+  }
+  if(Math.random()<0.6){
+    particles.push({
+      x:SHIP_SX-10+(Math.random()-0.5)*5,
+      y:py+(Math.random()-0.5)*5,
+      vx:-(Math.random()*1.0+0.2),
+      vy:(Math.random()-0.5)*1.5,
+      life:0.6+Math.random()*0.4,big:false
+    });
+  }
+
+  // Ship shape — always at SHIP_SX, py
+  const angle=holding?-Math.PI/4:Math.PI/4;
+  ctx.save();
+  ctx.translate(SHIP_SX,py);
+  ctx.rotate(angle);
+  ctx.shadowColor='#a78bfa';ctx.shadowBlur=22;
+  ctx.strokeStyle='rgba(167,139,250,0.45)';ctx.lineWidth=3;
+  ctx.beginPath();ctx.moveTo(13,0);ctx.lineTo(0,-7);ctx.lineTo(-13,0);ctx.lineTo(0,7);ctx.closePath();ctx.stroke();
+  ctx.shadowColor='#c4b5fd';ctx.shadowBlur=16;
+  ctx.fillStyle='#ddd6fe';
+  ctx.beginPath();ctx.moveTo(13,0);ctx.lineTo(0,-7);ctx.lineTo(-13,0);ctx.lineTo(0,7);ctx.closePath();ctx.fill();
+  ctx.shadowBlur=6;ctx.fillStyle='#fff';
+  ctx.beginPath();ctx.moveTo(6,0);ctx.lineTo(0,-3);ctx.lineTo(-6,0);ctx.lineTo(0,3);ctx.closePath();ctx.fill();
+  ctx.shadowBlur=0;
+  ctx.restore();
+}
+
+function checkCollision(){
+  const shipWX = worldX + SHIP_SX;
+  const d=holding?-1:1;
+  const pts=[
+    {wx:shipWX,    y:py},
+    {wx:shipWX+10, y:py+d*10},
+    {wx:shipWX-10, y:py-d*10},
+  ];
+  for(const pt of pts){
+    const t=getTunnel(pt.wx);
+    if(pt.y-4<=t.top||pt.y+4>=t.bot)return true;
+  }
+  return false;
+}
+
+function spawnBurst(){
+  for(let i=0;i<24;i++){
+    const a=Math.random()*Math.PI*2,spd=Math.random()*5+1;
+    particles.push({x:SHIP_SX,y:py,vx:Math.cos(a)*spd,vy:Math.sin(a)*spd,life:1,big:true});
+  }
+}
+
+function resetRun(){
+  worldX=0; py=H/2;
+  trail=[]; score=0; frame=0;
+  initTunnel();
+}
+
+function die(){
+  spawnBurst();
+  attempts++; attEl.textContent=attempts;
+  setTimeout(resetRun,260);
+}
+
+function loop(){
+  if(state!=='playing')return;
+  frame++;
+  const spd=SPEED+Math.min(score/700,2.5);
+
+  // Scroll world left
+  worldX+=spd;
+
+  // Move ship Y — same magnitude as speed for true 45°
+  if(holding) py-=spd; else py+=spd;
+
+  // Store trail in WORLD coords: wx is fixed offset ahead of worldX
+  // The ship's world-x = worldX + SHIP_SX (constant offset)
+  trail.push({wx: worldX + SHIP_SX, wy: py});
+  if(trail.length>TRAIL_LEN) trail.shift();
+
+  shiftTunnel();
+
+  score++;
+  scEl.textContent=Math.floor(score/10);
+  const d=Math.min(score/1200,1);
+  pctEl.textContent=d<0.12?'easy':d<0.38?'normal':d<0.65?'hard':d<0.88?'insane':'demon';
+
+  drawBg(); drawTunnel(); drawWave();
+
+  if(checkCollision()) die();
+  rafId=requestAnimationFrame(loop);
+}
+
+function startGame(){
+  if(state==='playing')return;
+  state='playing';
+  ov.style.display='none';
+  attempts=1; attEl.textContent='1';
+  particles=[];
+  initStars(); resetRun();
+  if(rafId)cancelAnimationFrame(rafId);
+  rafId=requestAnimationFrame(loop);
+}
+
+pb.addEventListener('click',startGame);
+document.addEventListener('keydown',e=>{if(['Space','ArrowUp','KeyW'].includes(e.code)){e.preventDefault();holding=true;}});
+document.addEventListener('keyup',e=>{if(['Space','ArrowUp','KeyW'].includes(e.code)){holding=false;}});
+canvas.addEventListener('mousedown',()=>holding=true);
+canvas.addEventListener('mouseup',()=>holding=false);
+canvas.addEventListener('mouseleave',()=>holding=false);
+canvas.addEventListener('touchstart',e=>{e.preventDefault();holding=true;},{passive:false});
+canvas.addEventListener('touchend',e=>{e.preventDefault();holding=false;},{passive:false});
+
+initStars();
+ctx.fillStyle='#07071a';ctx.fillRect(0,0,W,H);
+})();
+</script>
